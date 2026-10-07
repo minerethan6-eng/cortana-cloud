@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cortana</title>
+<style>
+  :root { --bg:#04070f; --fg:#e6eefc; --muted:#7f8fae; --cyan:#5fd0ff; --blue:#3a7bff; --violet:#2aa8ff; }
+  * { box-sizing:border-box; }
+  html, body { height:100%; margin:0; }
+  body { background:radial-gradient(ellipse at 50% 42%, #0d1a38 0%, var(--bg) 68%); color:var(--fg);
+         font-family:Inter, "Segoe UI", system-ui, -apple-system, sans-serif; overflow:hidden;
+         display:flex; flex-direction:column; align-items:center; justify-content:center; gap:18px; }
+  body::after { content:""; position:fixed; inset:0; pointer-events:none;
+         background:radial-gradient(ellipse at center, transparent 55%, rgba(0,0,0,.55) 100%); }
+  h1 { margin:0; font-weight:300; font-size:1.05rem; letter-spacing:.42em; padding-left:.42em; text-transform:uppercase;
+       color:#dbe8ff; z-index:1; }
+  #hud { width:min(480px, 76vw); aspect-ratio:1; z-index:1; }
+  #status { display:flex; align-items:center; gap:10px; padding:7px 16px; border-radius:999px; z-index:1;
+            background:rgba(255,255,255,.04); border:1px solid rgba(255,255,255,.09);
+            font-size:.8rem; letter-spacing:.06em; color:var(--muted); }
+  #status .dot { width:7px; height:7px; border-radius:50%; background:#4a5670; transition:all .3s; }
+  #status.live { color:var(--fg); }
+  #status.live .dot { background:var(--cyan); box-shadow:0 0 10px var(--cyan); }
+  #controls { display:flex; gap:12px; flex-wrap:wrap; justify-content:center; z-index:1; margin-top:4px; }
+  button { font-family:inherit; font-size:.88rem; font-weight:500; letter-spacing:.03em; color:var(--fg);
+           background:rgba(255,255,255,.05); border:1px solid rgba(255,255,255,.12); border-radius:10px;
+           padding:11px 22px; cursor:pointer; transition:background .2s, border-color .2s, transform .1s; }
+  button:hover:not(:disabled) { background:rgba(255,255,255,.1); border-color:rgba(255,255,255,.25); }
+  button:active:not(:disabled) { transform:scale(.98); }
+  button.primary { background:linear-gradient(135deg, var(--blue), var(--violet)); border-color:transparent; color:#fff; }
+  button.primary:hover:not(:disabled) { filter:brightness(1.12); background:linear-gradient(135deg, var(--blue), var(--violet)); }
+  button:disabled { opacity:.35; cursor:default; }
+  #devices { display:none; gap:12px; flex-wrap:wrap; justify-content:center; z-index:1; }
+  #devices.show { display:flex; }
+  #devices label { font-size:.72rem; letter-spacing:.08em; text-transform:uppercase; color:var(--muted); display:flex; align-items:center; gap:8px; }
+  #devices select { font-family:inherit; font-size:.8rem; color:var(--fg); background:rgba(255,255,255,.06);
+                    border:1px solid rgba(255,255,255,.14); border-radius:8px; padding:6px 8px; max-width:190px; }
+  #devices option { color:#000; }
+  #camwrap { position:fixed; right:22px; bottom:22px; width:210px; display:none; z-index:2; padding:8px;
+             border-radius:14px; background:rgba(8,14,30,.75); border:1px solid rgba(255,255,255,.1);
+             backdrop-filter:blur(8px); box-shadow:0 10px 30px rgba(0,0,0,.4); }
+  #camwrap span { display:block; font-size:.68rem; letter-spacing:.14em; text-transform:uppercase; color:var(--muted); margin:0 2px 6px; }
+  #cam { width:100%; display:block; border-radius:8px; transform:scaleX(-1); }
+</style>
+</head>
+<body>
+  <h1>Cortana</h1>
+  <canvas id="hud" width="520" height="520"></canvas>
+  <div id="status"><span class="dot"></span><span id="stxt">Ready</span></div>
+  <div id="controls">
+    <button id="connect" class="primary">Start</button>
+    <button id="mic" disabled>Mute</button>
+    <button id="camBtn" disabled>Camera on</button>
+  </div>
+  <div id="devices">
+    <label>Mic <select id="micSel"></select></label>
+    <label id="spkLabel">Speaker <select id="spkSel"></select></label>
+  </div>
+  <div id="camwrap"><span>Camera</span><video id="cam" autoplay muted playsinline></video></div>
+
+  <script src="https://cdn.jsdelivr.net/npm/livekit-client@2/dist/livekit-client.umd.min.js"></script>
+  <script>
+    const { Room, RoomEvent, Track } = LivekitClient;
+    const $ = (id) => document.getElementById(id);
+    let room = null, active = false, target = 0.15, level = 0.15, t = 0;
+
+    const setStatus = (txt, live) => { $("stxt").textContent = txt; $("status").classList.toggle("live", !!live); };
+
+    // --- orb ---
+    const ctx = $("hud").getContext("2d");
+    const C = 260, TAU = Math.PI * 2;
+    const BLOBS = [
+      ["95,210,255", 0.9, 0.0], ["60,150,255", 1.25, 1.6],
+      ["40,100,255", 0.7, 3.1], ["140,210,255", 1.05, 4.6],
+    ];
+    function disc(x, y, r) { ctx.beginPath(); ctx.arc(x, y, r, 0, TAU); ctx.fill(); }
+
+    function draw() {
+      level += (target - level) * 0.06;
+      t += 0.008 + level * 0.012;
+      const R = 108 + level * 14 + Math.sin(t * 2) * 2;
+      ctx.clearRect(0, 0, 520, 520);
+
+      // soft outer glow
+      ctx.globalCompositeOperation = "lighter";
+      let g = ctx.createRadialGradient(C, C, R * 0.6, C, C, R * 2.1);
+      g.addColorStop(0, `rgba(70,130,255,${0.30 + level * 0.22})`);
+      g.addColorStop(0.5, `rgba(60,150,255,${0.10 + level * 0.08})`);
+      g.addColorStop(1, "rgba(0,0,0,0)");
+      ctx.fillStyle = g; disc(C, C, R * 2.1);
+
+      // sphere body
+      ctx.globalCompositeOperation = "source-over";
+      g = ctx.createRadialGradient(C - R * 0.3, C - R * 0.35, R * 0.1, C, C, R);
+      g.addColorStop(0, "#b4e4ff"); g.addColorStop(0.35, "#3f8cff");
+      g.addColorStop(0.75, "#1b40b0"); g.addColorStop(1, "#071540");
+      ctx.fillStyle = g; disc(C, C, R);
+
+      // flowing colour inside the sphere
+      ctx.save();
+      ctx.beginPath(); ctx.arc(C, C, R, 0, TAU); ctx.clip();
+      ctx.globalCompositeOperation = "lighter";
+      BLOBS.forEach(([col, sp, ph], i) => {
+        const ang = t * sp + ph, rad = R * (0.34 + 0.16 * Math.sin(t * 1.3 + i));
+        const x = C + Math.cos(ang) * rad, y = C + Math.sin(ang * 0.8) * rad, size = R * (0.75 + level * 0.15);
+        const b = ctx.createRadialGradient(x, y, 0, x, y, size);
+        b.addColorStop(0, `rgba(${col},${0.5 + level * 0.25})`); b.addColorStop(1, `rgba(${col},0)`);
+        ctx.fillStyle = b; disc(x, y, size);
+      });
+      ctx.restore();
+
+      // edge light and highlight
+      ctx.globalCompositeOperation = "source-over";
+      g = ctx.createRadialGradient(C, C, R * 0.78, C, C, R);
+      g.addColorStop(0, "rgba(160,210,255,0)"); g.addColorStop(1, `rgba(170,215,255,${0.32 + level * 0.15})`);
+      ctx.fillStyle = g; disc(C, C, R);
+      g = ctx.createRadialGradient(C - R * 0.38, C - R * 0.42, 0, C - R * 0.38, C - R * 0.42, R * 0.42);
+      g.addColorStop(0, "rgba(255,255,255,.38)"); g.addColorStop(1, "rgba(255,255,255,0)");
+      ctx.fillStyle = g; disc(C - R * 0.38, C - R * 0.42, R * 0.42);
+      ctx.strokeStyle = "rgba(200,228,255,.4)"; ctx.lineWidth = 1.2;
+      ctx.beginPath(); ctx.arc(C, C, R, 0, TAU); ctx.stroke();
+
+      // thin orbit ring with a travelling dot
+      ctx.save();
+      ctx.translate(C, C); ctx.rotate(-0.35 + Math.sin(t * 0.5) * 0.05);
+      ctx.strokeStyle = "rgba(150,200,255,.22)"; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.ellipse(0, 0, R * 1.5, R * 0.42, 0, 0, TAU); ctx.stroke();
+      const da = t * 1.4;
+      ctx.fillStyle = "rgba(200,235,255,.9)";
+      disc(Math.cos(da) * R * 1.5, Math.sin(da) * R * 0.42, 2.6);
+      ctx.restore();
+
+      // voice ripples
+      ctx.lineWidth = 1;
+      for (let i = 0; i < 2; i++) {
+        const f = (t * 0.55 + i * 0.5) % 1;
+        ctx.strokeStyle = `rgba(130,190,255,${(1 - f) * level * 0.35})`;
+        ctx.beginPath(); ctx.arc(C, C, R * (1.08 + f * 0.7), 0, TAU); ctx.stroke();
+      }
+      requestAnimationFrame(draw);
+    }
+    draw();
+
+    // --- connection ---
+    async function getToken() {
+      let code = "";
+      try { code = localStorage.getItem("cortana_code") || ""; } catch (e) {}
+      for (let i = 0; i < 2; i++) {
+        const r = await fetch("https://cortana-cloud.minerethan6-eng.deno.net/token?code=" + encodeURIComponent(code));
+        if (r.ok) {
+          try { if (code) localStorage.setItem("cortana_code", code); } catch (e) {}
+          return r.json();
+        }
+        if (r.status !== 401) throw new Error("server error");
+        code = prompt("Enter your access code") || "";
+        if (!code) throw new Error("no code");
+      }
+      try { localStorage.removeItem("cortana_code"); } catch (e) {}
+      throw new Error("wrong access code");
+    }
+
+    async function start() {
+      $("connect").disabled = true;
+      setStatus("Connecting…");
+      try {
+        const { url, token } = await getToken();
+        room = new Room({ adaptiveStream: true, dynacast: true });
+
+        room.on(RoomEvent.TrackSubscribed, (track) => {
+          if (track.kind === Track.Kind.Audio) {
+            const el = track.attach(); el.style.display = "none"; document.body.appendChild(el);
+          }
+        });
+        room.on(RoomEvent.ActiveSpeakersChanged, (speakers) => {
+          const her = speakers.some((s) => !s.isLocal);
+          const you = speakers.some((s) => s.isLocal);
+          target = her ? 1 : you ? 0.45 : 0.15;
+          setStatus(her ? "Speaking" : you ? "Listening" : "Connected", true);
+        });
+        room.on(RoomEvent.Disconnected, reset);
+
+        await room.connect(url, token);
+        await room.startAudio();
+        await room.localParticipant.setMicrophoneEnabled(true);
+        loadDevices();
+        setupHeadsetButtons();
+
+        active = true;
+        $("connect").textContent = "End session";
+        $("connect").disabled = false;
+        $("connect").onclick = () => room.disconnect();
+        $("mic").disabled = false; $("camBtn").disabled = false;
+        setStatus("Connected", true);
+      } catch (e) {
+        console.error(e);
+        setStatus("Connection failed. Check that the server is running.");
+        reset();
+      }
+    }
+
+    function reset() {
+      active = false; target = 0.15;
+      $("camwrap").style.display = "none"; $("cam").srcObject = null; $("devices").classList.remove("show");
+      $("connect").textContent = "Start"; $("connect").disabled = false; $("connect").onclick = start;
+      $("mic").disabled = true; $("camBtn").disabled = true;
+      $("mic").textContent = "Mute"; $("camBtn").textContent = "Camera on";
+      room = null; setStatus("Ready");
+    }
+    $("connect").onclick = start;
+
+    async function toggleMic() {
+      if (!room) return;
+      const on = room.localParticipant.isMicrophoneEnabled;
+      await room.localParticipant.setMicrophoneEnabled(!on);
+      $("mic").textContent = on ? "Unmute" : "Mute";
+    }
+    $("mic").onclick = toggleMic;
+    document.addEventListener("keydown", (e) => { if (e.key.toLowerCase() === "m" && !e.repeat && !e.ctrlKey && !e.metaKey) toggleMic(); });
+
+    // headset and device selection
+    function fill(sel, list, active) {
+      sel.innerHTML = "";
+      list.forEach((d) => {
+        const o = document.createElement("option");
+        o.value = d.deviceId; o.textContent = d.label || "Device";
+        if (d.deviceId === active) o.selected = true;
+        sel.appendChild(o);
+      });
+    }
+    async function loadDevices() {
+      try {
+        fill($("micSel"), await Room.getLocalDevices("audioinput"), room.getActiveDevice("audioinput"));
+        if ("setSinkId" in HTMLMediaElement.prototype) {
+          fill($("spkSel"), await Room.getLocalDevices("audiooutput"), room.getActiveDevice("audiooutput"));
+        } else { $("spkLabel").style.display = "none"; }
+        $("devices").classList.add("show");
+      } catch (e) { console.warn(e); }
+    }
+    $("micSel").onchange = (e) => room.switchActiveDevice("audioinput", e.target.value);
+    $("spkSel").onchange = (e) => room.switchActiveDevice("audiooutput", e.target.value);
+    function setupHeadsetButtons() {
+      if (!("mediaSession" in navigator)) return;
+      try {
+        navigator.mediaSession.metadata = new MediaMetadata({ title: "Cortana", artist: "Voice assistant" });
+        navigator.mediaSession.setActionHandler("pause", toggleMic);
+        navigator.mediaSession.setActionHandler("play", toggleMic);
+      } catch (e) { console.warn(e); }
+    }
+
+    $("camBtn").onclick = async () => {
+      const on = room.localParticipant.isCameraEnabled;
+      await room.localParticipant.setCameraEnabled(!on);
+      const pub = room.localParticipant.getTrackPublication(Track.Source.Camera);
+      if (!on && pub && pub.track) { pub.track.attach($("cam")); $("camwrap").style.display = "block"; }
+      else { $("camwrap").style.display = "none"; }
+      $("camBtn").textContent = on ? "Camera on" : "Camera off";
+    };
+  </script>
+</body>
+</html>
